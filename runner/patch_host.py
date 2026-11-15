@@ -62,6 +62,18 @@ patch("dm/ios/Sources/front_ios.m", [
      ': [NSBundle.mainBundle objectForInfoDictionaryKey:@"DMShowFPS"]) boolValue]', 1),
 ])
 
+patch("dm/ios/Sources/GameMenu.swift", [
+    # hosted: the in-game menu's first row goes to the host's HOME Menu (NXH_HOME: hex address of a
+    # void (*)(void)); the touch gamepad has no HOME button of its own
+    ('    if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }\n    return items\n}',
+     '    if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }\n'
+     '    if let h = getenv("NXH_HOME"), let addr = UInt(String(cString: h), radix: 16), addr != 0 {\n'
+     '        let home = unsafeBitCast(addr, to: (@convention(c) () -> Void).self)\n'
+     '        items.insert(UIMenu(options: .displayInline, children: [UIAction(title: "HOME Menu", image: UIImage(systemName: "house.fill")) { _ in home() }]), at: 0)\n'
+     '    }\n'
+     '    return items\n}', 1),
+])
+
 patch("dm/ios/Sources/Launcher.swift", [
     ('private func info(_ key: String) -> Any? { Bundle.main.object(forInfoDictionaryKey: key) }',
      'private func info(_ key: String) -> Any? {\n'
