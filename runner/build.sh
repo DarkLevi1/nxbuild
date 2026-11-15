@@ -63,6 +63,8 @@ stage "build"
 ARGS=$(python3 -c "import json,shlex; print(' '.join(shlex.quote(a) for a in json.load(open('$W/job.json'))['args']))")
 TID=$(python3 -c "import json; print(json.load(open('$W/job.json'))['title_id'])")
 BID="org.nxnative.$(echo "$TID" | tr 'A-F' 'a-f')"
+SEND_ROMFS=$(python3 -c "import json; print(1 if json.load(open('$W/job.json')).get('send_romfs', True) else 0)")
+mkdir -p "$W/out"   # the packer writes the IPA there and doesn't make the folder itself
 (
     cd "$W/nxnative" &&
     eval python3 scripts/build_ipa_from_nsp.py "\"$W/in\"" -k "\"$W/prod.keys\"" --romfs separate --progress lines \
@@ -80,10 +82,14 @@ rm -f "$W/prod.keys"
 stage "sending back"
 ls -la "$W/out" >> "$LOG" 2>&1
 python3 "$HERE/client.py" put "$W/out/game.ipa" game.ipa || fail "send app"
-# the packed version's RomFS image: the biggest one (a DLC's are small)
-IMG=$(find "$W/build" -iname 'romfs.img' -size +1M -exec ls -s {} + 2>/dev/null | sort -rn | head -1 | awk '{print $2}')
-find "$W/build" -iname '*.img' -exec ls -la {} + >> "$LOG" 2>&1
-[ -n "$IMG" ] || fail "no romfs image"
-python3 "$HERE/client.py" put "$IMG" romfs.img || fail "send game files"
+if [ "$SEND_ROMFS" = 1 ]; then
+    # the packed version's RomFS image: the biggest one (a DLC's are small)
+    IMG=$(find "$W/build" -iname 'romfs.img' -size +1M -exec ls -s {} + 2>/dev/null | sort -rn | head -1 | awk '{print $2}')
+    find "$W/build" -iname '*.img' -exec ls -la {} + >> "$LOG" 2>&1
+    [ -n "$IMG" ] || fail "no romfs image"
+    python3 "$HERE/client.py" put "$IMG" romfs.img || fail "send game files"
+else
+    say "game files not sent back (the PC makes its own romfs.img)"
+fi
 python3 "$HERE/client.py" log "$LOG"
 stage "done"
