@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import nxcrypt
@@ -52,6 +53,7 @@ def job():
 
 
 PARALLEL = int(os.environ.get("NX_PARALLEL", "8"))
+PUT_PARALLEL = 4      # back to the PC: its drive writes them one at a time anyway
 
 
 def get(dest):
@@ -99,31 +101,46 @@ def get(dest):
     say(f"download complete: {total / 1e9:.2f} GB in {(time.time() - t0) / 60:.1f} min")
 
 
+def _status(method, path, body=None):
+    """One request; (HTTP status, body), 0 when it didn't get through."""
+    try:
+        req = urllib.request.Request(URL + path, data=body, method=method, headers={
+            "Authorization": "Bearer " + TOKEN, "User-Agent": "builder", "Content-Type": "application/octet-stream"})
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except Exception:
+        return 0, b""
+
+
 def put(path, name):
     size = os.path.getsize(path)
     parts = max(1, (size + nxcrypt.PIECE - 1) // nxcrypt.PIECE)
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(8 << 20), b""):
-            h.update(chunk)
     stream = f"u:{name}"
     t0 = time.time()
+    qname = urllib.request.quote(name)
 
     def piece(p):
         with open(path, "rb") as fh:
             fh.seek(p * nxcrypt.PIECE)
             data = fh.read(nxcrypt.PIECE)
-        _req("PUT", f"/up?job={JOB}&name={urllib.request.quote(name)}&p={p}", nxcrypt.seal(KEY, stream, p, data))
+        _req("PUT", f"/up?job={JOB}&name={qname}&p={p}", nxcrypt.seal(KEY, stream, p, data), tries=20)
 
-    for attempt in range(3):
-        with cf.ThreadPoolExecutor(PARALLEL) as ex:
-            list(ex.map(piece, range(parts)))
-        try:
-            _req("POST", f"/done?job={JOB}&name={urllib.request.quote(name)}&size={size}&sha={h.hexdigest()}", b"", tries=4)
-            say(f"sent {name}: {size / 1e6:.1f} MB in {(time.time() - t0) / 60:.1f} min")
-            return
-        except SystemExit:
-            say(f"{name}: send failed, trying again")
+    todo = list(range(parts))
+    for attempt in range(6):
+        with cf.ThreadPoolExecutor(PUT_PARALLEL) as ex:
+            list(ex.map(piece, todo))
+        for _ in range(12):
+            st, body = _status("POST", f"/done?job={JOB}&name={qname}&size={size}&sha=-", b"")
+            if st == 200:
+                say(f"sent {name}: {size / 1e6:.1f} MB in {(time.time() - t0) / 60:.1f} min")
+                return
+            if st == 409 and body.startswith(b"missing:"):
+                todo = [int(x) for x in body[8:].decode().split(",") if x]
+                say(f"{name}: sending {len(todo)} missing pieces again")
+                break
+            time.sleep(10)   # the tunnel or the PC is busy: ask again
     raise SystemExit("upload failed")
 
 
