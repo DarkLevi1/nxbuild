@@ -116,7 +116,7 @@ def put(path, name):
         _req("PUT", f"/up?job={JOB}&name={urllib.request.quote(name)}&p={p}", nxcrypt.seal(KEY, stream, p, data))
 
     for attempt in range(3):
-        with cf.ThreadPoolExecutor(4) as ex:
+        with cf.ThreadPoolExecutor(PARALLEL) as ex:
             list(ex.map(piece, range(parts)))
         try:
             _req("POST", f"/done?job={JOB}&name={urllib.request.quote(name)}&size={size}&sha={h.hexdigest()}", b"", tries=4)
