@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 
@@ -29,10 +30,12 @@ def _req(method, path, body=None, tries=8):
             req = urllib.request.Request(URL + path, data=body, method=method, headers={
                 "Authorization": "Bearer " + TOKEN, "User-Agent": "builder",
                 "Content-Type": "application/octet-stream"})
-            with urllib.request.urlopen(req, timeout=300) as r:
+            with urllib.request.urlopen(req, timeout=180) as r:
                 return r.read()
         except Exception as e:  # tunnel hiccups: wait and try again
             last = e
+            if attempt >= 2:
+                print(f"retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
             time.sleep(min(60, 3 * (attempt + 1)))
     raise SystemExit(f"request failed after {tries} tries ({type(last).__name__})")
 
@@ -48,12 +51,29 @@ def job():
     return json.loads(nxcrypt.open_(KEY, "job", 0, _req("GET", f"/job?job={JOB}")))
 
 
+PARALLEL = int(os.environ.get("NX_PARALLEL", "8"))
+
+
 def get(dest):
     j = job()
     os.makedirs(dest, exist_ok=True)
     total = sum(f["size"] for f in j["files"])
     done = [0]
     t0 = time.time()
+    finished = [False]
+
+    def report():   # every 2 minutes, whatever the pieces are doing
+        while not finished[0]:
+            for _ in range(120):
+                if finished[0]:
+                    return
+                time.sleep(1)
+            el = max(1, time.time() - t0)
+            rate = done[0] / el
+            left = (total - done[0]) / rate / 60 if rate > 0 else 0
+            say(f"download {done[0] / 1e9:.2f} / {total / 1e9:.2f} GB ({rate / 1e6:.2f} MB/s, ~{left:.0f} min left)")
+
+    threading.Thread(target=report, daemon=True).start()
 
     def piece(i, p, path):
         data = nxcrypt.open_(KEY, f"f{i}", p, _req("GET", f"/file?job={JOB}&i={i}&p={p}"))
@@ -71,16 +91,11 @@ def get(dest):
         with open(path, "wb") as fh:
             fh.truncate(f["size"])
         parts = (f["size"] + nxcrypt.PIECE - 1) // nxcrypt.PIECE
-        with cf.ThreadPoolExecutor(4) as ex:
-            futs = [ex.submit(piece, i, p, path) for p in range(parts)]
-            last = time.time()
-            for fut in cf.as_completed(futs):
+        with cf.ThreadPoolExecutor(PARALLEL) as ex:
+            for fut in cf.as_completed([ex.submit(piece, i, p, path) for p in range(parts)]):
                 fut.result()
-                if time.time() - last > 60:
-                    last = time.time()
-                    rate = done[0] / max(1, time.time() - t0) / 1e6
-                    say(f"download {done[0] / 1e9:.2f} / {total / 1e9:.2f} GB ({rate:.1f} MB/s)")
         open(path + ".ok", "w").close()
+    finished[0] = True
     say(f"download complete: {total / 1e9:.2f} GB in {(time.time() - t0) / 60:.1f} min")
 
 

@@ -10,7 +10,8 @@ import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 FRAME = 4 * 1024 * 1024          # plaintext bytes per frame
-PIECE = 48 * 1024 * 1024         # plaintext bytes per HTTP request (under the tunnel's 100 MB body cap)
+PIECE = 16 * 1024 * 1024         # plaintext bytes per HTTP request: small, so a slow line still finishes each
+                                 # request well within the tunnel's timeouts (and under its 100 MB body cap)
 
 
 def _aad(stream: str, piece: int, frame: int) -> bytes:
