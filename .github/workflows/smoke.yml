@@ -1,0 +1,36 @@
+name: smoke
+
+# The iOS app built with synthetic modules (nxnative's own build_smoke.py, no game files), with the host
+# patch applied: checks that the patched sources compile and link.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Tools and source
+        run: |
+          brew install xcodegen >/dev/null
+          git clone --depth 1 https://github.com/seedds/nxnative.git "$RUNNER_TEMP/nxnative"
+          python3 runner/patch_host.py "$RUNNER_TEMP/nxnative"
+      - name: Build the iOS app (synthetic)
+        run: |
+          cd "$RUNNER_TEMP/nxnative"
+          python3 dm/ios/tools/build_smoke.py --output "$RUNNER_TEMP/ios-smoke" > "$RUNNER_TEMP/smoke.log" 2>&1 && ok=1 || ok=0
+          grep -E "error:|warning: unused|\*\* BUILD|FAILED|Error" "$RUNNER_TEMP/smoke.log" | head -80
+          tail -60 "$RUNNER_TEMP/smoke.log"
+          [ "$ok" = 1 ]

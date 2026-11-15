@@ -12,7 +12,13 @@ stage() { echo "== $1"; say "stage: $1"; }
 fail() {
     echo "== failed: $1"
     say "FAILED: $1"
-    python3 "$HERE/client.py" log "$LOG"
+    # the whole log as a file (never lost to a text problem), and its end as progress lines
+    python3 "$HERE/client.py" put "$LOG" build.log || true
+    tail -c 60000 "$LOG" > "$W/tail.log"; python3 "$HERE/client.py" log "$W/tail.log"
+    # the packer's own step logs, if it got that far
+    if [ -d "$W/build/logs" ]; then
+        (cd "$W/build" && tar czf "$W/steplogs.tgz" logs) && python3 "$HERE/client.py" put "$W/steplogs.tgz" steplogs.tgz || true
+    fi
     exit 1
 }
 
