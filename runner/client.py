@@ -88,10 +88,11 @@ def _req(method, path, body=None, tries=8, patience=0):
                 return r.read()
         except Exception as e:  # tunnel hiccups: wait and try again
             last = e
-            if attempt >= 2:
-                if attempt % 10 == 2:
-                    print(f"retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
-                _refresh_url()
+            if attempt % 10 == 2:
+                print(f"retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
+            # every failure looks for a newer address (at most every 30 s): a short-lived call (say) starts
+            # with the address the run was given, which is gone after the PC restarted its tunnel
+            _refresh_url()
             time.sleep(min(30, 3 * (attempt + 1)))
         attempt += 1
     raise SystemExit(f"request failed after {attempt} tries ({type(last).__name__})")
