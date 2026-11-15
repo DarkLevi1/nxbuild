@@ -1,0 +1,51 @@
+name: probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: link
+        required: true
+      job:
+        description: job
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      NX_URL: ${{ inputs.url }}
+      NX_JOB: ${{ inputs.job }}
+      NX_TOKEN: ${{ secrets.NX_TOKEN }}
+      NX_KEY: ${{ secrets.NX_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Machine
+        run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          df -h / /System/Volumes/Data
+          ls /Applications | grep -i xcode
+          xcodebuild -version
+          python3 --version
+          du -sh ~/Library/Developer/CoreSimulator 2>/dev/null || true
+          du -sh /Library/Developer/CoreSimulator 2>/dev/null || true
+      - name: Link
+        run: |
+          python3 -m pip install --quiet --break-system-packages cryptography || python3 -m pip install --quiet cryptography
+          cd runner
+          python3 client.py say "probe: machine up"
+          t0=$(date +%s)
+          python3 client.py get "$RUNNER_TEMP/in"
+          t1=$(date +%s)
+          python3 client.py put "$RUNNER_TEMP/in/test.bin" back.bin
+          t2=$(date +%s)
+          python3 client.py say "probe: down $((t1-t0)) s, up $((t2-t1)) s"
+          echo "transfer ok"
