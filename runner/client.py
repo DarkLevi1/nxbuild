@@ -22,9 +22,36 @@ JOB = os.environ["NX_JOB"]
 TOKEN = os.environ["NX_TOKEN"]
 KEY = bytes.fromhex(os.environ["NX_KEY"])
 GIST = os.environ.get("NX_GIST", "")
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
+OWNER = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
 _url = [os.environ["NX_URL"].rstrip("/")]
 _url_lock = threading.Lock()
 _last_look = [0.0]
+
+PATIENCE = 3600     # a file piece keeps being asked for this long (the PC can be away for a while)
+
+
+def _gist_blob():
+    """This job's entry in the gist. The API without a login allows 60 looks an hour, which a long outage
+    uses up: with the run's own token first, then without, then the raw file (no limit, cached a few minutes)."""
+    name = f"{JOB}.txt"
+    api = f"https://api.github.com/gists/{GIST}"
+    for hdr in ([{"Authorization": "Bearer " + GH_TOKEN}] if GH_TOKEN else []) + [{}]:
+        try:
+            req = urllib.request.Request(api, headers={"User-Agent": "builder", **hdr})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return ((json.load(r).get("files", {}).get(name) or {}).get("content", "")).strip()
+        except Exception:
+            continue
+    if OWNER:
+        try:
+            req = urllib.request.Request(f"https://gist.githubusercontent.com/{OWNER}/{GIST}/raw/{name}?t={int(time.time())}",
+                                         headers={"User-Agent": "builder", "Cache-Control": "no-cache"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read().decode().strip()
+        except Exception:
+            pass
+    return ""
 
 
 def _refresh_url():
@@ -37,10 +64,7 @@ def _refresh_url():
             return
         _last_look[0] = time.time()
         try:
-            req = urllib.request.Request(f"https://api.github.com/gists/{GIST}", headers={"User-Agent": "builder"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                files = json.load(r).get("files", {})
-            blob = (files.get(f"{JOB}.txt") or {}).get("content", "").strip()
+            blob = _gist_blob()
             if blob:
                 url = nxcrypt.open_(KEY, "url", 0, bytes.fromhex(blob)).decode().rstrip("/")
                 if url != _url[0]:
@@ -50,9 +74,12 @@ def _refresh_url():
             print(f"address check failed: {type(e).__name__}", file=sys.stderr)
 
 
-def _req(method, path, body=None, tries=8):
+def _req(method, path, body=None, tries=8, patience=0):
+    """tries attempts, or with patience: as many as fit in that many seconds."""
     last = None
-    for attempt in range(tries):
+    t0 = time.time()
+    attempt = 0
+    while attempt < tries or (patience and time.time() - t0 < patience):
         try:
             req = urllib.request.Request(_url[0] + path, data=body, method=method, headers={
                 "Authorization": "Bearer " + TOKEN, "User-Agent": "builder",
@@ -62,10 +89,12 @@ def _req(method, path, body=None, tries=8):
         except Exception as e:  # tunnel hiccups: wait and try again
             last = e
             if attempt >= 2:
-                print(f"retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
+                if attempt % 10 == 2:
+                    print(f"retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
                 _refresh_url()
-            time.sleep(min(60, 3 * (attempt + 1)))
-    raise SystemExit(f"request failed after {tries} tries ({type(last).__name__})")
+            time.sleep(min(30, 3 * (attempt + 1)))
+        attempt += 1
+    raise SystemExit(f"request failed after {attempt} tries ({type(last).__name__})")
 
 
 def say(text):
@@ -105,7 +134,7 @@ def get(dest):
     threading.Thread(target=report, daemon=True).start()
 
     def piece(i, p, path):
-        data = nxcrypt.open_(KEY, f"f{i}", p, _req("GET", f"/file?job={JOB}&i={i}&p={p}", tries=20))
+        data = nxcrypt.open_(KEY, f"f{i}", p, _req("GET", f"/file?job={JOB}&i={i}&p={p}", tries=20, patience=PATIENCE))
         with open(path, "r+b") as fh:
             fh.seek(p * nxcrypt.PIECE)
             fh.write(data)
@@ -119,10 +148,22 @@ def get(dest):
             continue
         with open(path, "wb") as fh:
             fh.truncate(f["size"])
-        parts = (f["size"] + nxcrypt.PIECE - 1) // nxcrypt.PIECE
-        with cf.ThreadPoolExecutor(PARALLEL) as ex:
-            for fut in cf.as_completed([ex.submit(piece, i, p, path) for p in range(parts)]):
-                fut.result()
+        todo = list(range((f["size"] + nxcrypt.PIECE - 1) // nxcrypt.PIECE))
+        for _ in range(4):          # a piece that gave up is asked for again in the next pass
+            failed = []
+            with cf.ThreadPoolExecutor(PARALLEL) as ex:
+                futs = {ex.submit(piece, i, p, path): p for p in todo}
+                for fut in cf.as_completed(futs):
+                    try:
+                        fut.result()
+                    except BaseException:
+                        failed.append(futs[fut])
+            if not failed:
+                break
+            say(f"download: {len(failed)} pieces again")
+            todo = sorted(failed)
+        else:
+            raise SystemExit("download failed")
         open(path + ".ok", "w").close()
     finished[0] = True
     say(f"download complete: {total / 1e9:.2f} GB in {(time.time() - t0) / 60:.1f} min")
@@ -153,13 +194,17 @@ def put(path, name):
         with open(path, "rb") as fh:
             fh.seek(p * nxcrypt.PIECE)
             data = fh.read(nxcrypt.PIECE)
-        _req("PUT", f"/up?job={JOB}&name={qname}&p={p}", nxcrypt.seal(KEY, stream, p, data), tries=20)
+        try:
+            _req("PUT", f"/up?job={JOB}&name={qname}&p={p}", nxcrypt.seal(KEY, stream, p, data), tries=20,
+                 patience=PATIENCE)
+        except SystemExit:
+            pass        # the PC lists it as missing at /done and it's sent again
 
     todo = list(range(parts))
     for attempt in range(6):
         with cf.ThreadPoolExecutor(PUT_PARALLEL) as ex:
             list(ex.map(piece, todo))
-        for _ in range(12):
+        for _ in range(60):         # up to 10 minutes for the PC to answer
             st, body = _status("POST", f"/done?job={JOB}&name={qname}&size={size}&sha=-", b"")
             if st == 200:
                 say(f"sent {name}: {size / 1e6:.1f} MB in {(time.time() - t0) / 60:.1f} min")

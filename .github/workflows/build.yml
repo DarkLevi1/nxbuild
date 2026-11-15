@@ -25,6 +25,7 @@ jobs:
       NX_TOKEN: ${{ secrets.NX_TOKEN }}
       NX_KEY: ${{ secrets.NX_KEY }}
       NX_GIST: ${{ secrets.NX_GIST }}
+      GH_TOKEN: ${{ github.token }}
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
