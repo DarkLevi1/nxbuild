@@ -18,17 +18,43 @@ import urllib.request
 
 import nxcrypt
 
-URL = os.environ["NX_URL"].rstrip("/")
 JOB = os.environ["NX_JOB"]
 TOKEN = os.environ["NX_TOKEN"]
 KEY = bytes.fromhex(os.environ["NX_KEY"])
+GIST = os.environ.get("NX_GIST", "")
+_url = [os.environ["NX_URL"].rstrip("/")]
+_url_lock = threading.Lock()
+_last_look = [0.0]
+
+
+def _refresh_url():
+    """The PC restarts a tunnel that dies (a new address each time) and posts the address, encrypted, in a
+    gist: look there when the PC can't be reached (at most every 30 s)."""
+    if not GIST:
+        return
+    with _url_lock:
+        if time.time() - _last_look[0] < 30:
+            return
+        _last_look[0] = time.time()
+        try:
+            req = urllib.request.Request(f"https://api.github.com/gists/{GIST}", headers={"User-Agent": "builder"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                files = json.load(r).get("files", {})
+            blob = (files.get(f"{JOB}.txt") or {}).get("content", "").strip()
+            if blob:
+                url = nxcrypt.open_(KEY, "url", 0, bytes.fromhex(blob)).decode().rstrip("/")
+                if url != _url[0]:
+                    _url[0] = url
+                    print("the PC's address changed: going on with the new one", file=sys.stderr)
+        except Exception as e:
+            print(f"address check failed: {type(e).__name__}", file=sys.stderr)
 
 
 def _req(method, path, body=None, tries=8):
     last = None
     for attempt in range(tries):
         try:
-            req = urllib.request.Request(URL + path, data=body, method=method, headers={
+            req = urllib.request.Request(_url[0] + path, data=body, method=method, headers={
                 "Authorization": "Bearer " + TOKEN, "User-Agent": "builder",
                 "Content-Type": "application/octet-stream"})
             with urllib.request.urlopen(req, timeout=180) as r:
@@ -37,6 +63,7 @@ def _req(method, path, body=None, tries=8):
             last = e
             if attempt >= 2:
                 print(f"retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
+                _refresh_url()
             time.sleep(min(60, 3 * (attempt + 1)))
     raise SystemExit(f"request failed after {tries} tries ({type(last).__name__})")
 
@@ -78,7 +105,7 @@ def get(dest):
     threading.Thread(target=report, daemon=True).start()
 
     def piece(i, p, path):
-        data = nxcrypt.open_(KEY, f"f{i}", p, _req("GET", f"/file?job={JOB}&i={i}&p={p}"))
+        data = nxcrypt.open_(KEY, f"f{i}", p, _req("GET", f"/file?job={JOB}&i={i}&p={p}", tries=20))
         with open(path, "r+b") as fh:
             fh.seek(p * nxcrypt.PIECE)
             fh.write(data)
@@ -104,13 +131,14 @@ def get(dest):
 def _status(method, path, body=None):
     """One request; (HTTP status, body), 0 when it didn't get through."""
     try:
-        req = urllib.request.Request(URL + path, data=body, method=method, headers={
+        req = urllib.request.Request(_url[0] + path, data=body, method=method, headers={
             "Authorization": "Bearer " + TOKEN, "User-Agent": "builder", "Content-Type": "application/octet-stream"})
         with urllib.request.urlopen(req, timeout=180) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
     except Exception:
+        _refresh_url()
         return 0, b""
 
 
