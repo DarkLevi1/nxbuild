@@ -1,0 +1,39 @@
+name: build3ds
+run-name: build3ds ${{ inputs.job }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: link
+        required: true
+      job:
+        description: job
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 355
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      NX_URL: ${{ inputs.url }}
+      NX_JOB: ${{ inputs.job }}
+      NX_TOKEN: ${{ secrets.NX_TOKEN }}
+      NX_KEY: ${{ secrets.NX_KEY }}
+      NX_GIST: ${{ secrets.NX_GIST }}
+      GH_TOKEN: ${{ github.token }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Build
+        run: bash runner/build3ds.sh
